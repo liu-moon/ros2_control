@@ -5,7 +5,7 @@
 set -e
 
 DISPLAY_NUM=1
-RESOLUTION=1280x800x24
+RESOLUTION=1920x1080x24
 export DISPLAY=:${DISPLAY_NUM}
 
 if ! pgrep -f "Xvfb :${DISPLAY_NUM}" > /dev/null; then
