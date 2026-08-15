@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Bring up the virtual desktop (Xvfb + fluxbox + x11vnc + noVNC), idempotent.
+/usr/local/bin/start-vnc.sh
+
 # Source the base ROS2 install.
 source /opt/ros/jazzy/setup.bash
 

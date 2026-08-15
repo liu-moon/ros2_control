@@ -9,7 +9,15 @@ services:
     tty: true
     volumes:
       - ./src:/workspace/src
+    ports:
+      # noVNC web client -- open http://localhost:6080/vnc.html in a browser
+      # to see the container's virtual desktop. Bound to localhost only.
+      - "127.0.0.1:6080:6080"
     environment:
-      # XQuartz on macOS listens over TCP; Docker Desktop resolves this to the host.
-      - DISPLAY=host.docker.internal:0
+      # Self-contained virtual X display (Xvfb) started by the entrypoint --
+      # not the host's XQuartz, which can't satisfy rviz2/Gazebo's GLX needs.
+      - DISPLAY=:1
+      # Force Mesa's software rasterizer (llvmpipe) instead of trying to
+      # negotiate hardware/DRI rendering that isn't available in the container.
+      - LIBGL_ALWAYS_SOFTWARE=1
     working_dir: /workspace

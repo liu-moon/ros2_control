@@ -4,23 +4,24 @@ This repo separates **environment** (Docker image: ROS 2 Jazzy + ros2_control +
 Gazebo + rviz2/rqt + dev tools) from **source** (`src/`, bind-mounted, edited on
 the host and built with `colcon` inside the container).
 
-## One-time host setup (macOS)
+## GUI apps (rviz2, rqt, Gazebo)
 
-GUI apps (rviz2, rqt, Gazebo) need an X server on the Mac since Docker Desktop
-does not forward a display or GPU into Linux containers by default.
+GUI apps run on a self-contained virtual desktop *inside* the container (Xvfb +
+fluxbox + x11vnc + noVNC), viewable in any browser — no host X server needed.
 
-1. Install XQuartz: `brew install --cask xquartz`
-2. Open XQuartz → Preferences → Security → check **"Allow connections from
-   network clients"**
-3. Fully quit and restart XQuartz for the setting to take effect
-4. Every time XQuartz (re)starts, allow local connections:
-   ```
-   xhost + 127.0.0.1
-   ```
+> We tried XQuartz's X11 forwarding first, but its indirect GLX implementation
+> can't satisfy the OpenGL context rviz2/Gazebo request (`BadValue` /
+> `X_GLXCreateNewContext` errors) — a known dead end on macOS. The container
+> now renders with Mesa's software rasterizer (llvmpipe) into its own virtual
+> display instead, which is what actually works reliably.
 
-> Rendering runs in software (no GPU passthrough on macOS), so Gazebo/rviz2 will
-> be usable but not fast. If that becomes a problem, a VNC/noVNC-based container
-> desktop is a good next step — not set up here yet.
+1. `docker compose up -d` (the entrypoint starts the virtual desktop automatically)
+2. Open **http://localhost:6080/vnc.html** in a browser, click **Connect**
+3. Run GUI apps from a container shell (`docker compose exec ros2_control bash`)
+   — their windows appear in that browser tab
+
+No password is set on the VNC server; the port is bound to `127.0.0.1` only,
+so it's not reachable outside your machine.
 
 ## Build
 
@@ -51,5 +52,6 @@ the image (`docker compose build`) when you add new system/apt dependencies to
 ## Verify the setup
 
 - `ros2 pkg list | grep ros2_control` — confirms the ros2_control packages installed
-- `xeyes` — should pop up a window on your Mac desktop, confirming X11 forwarding
-  works, before trying rviz2/Gazebo
+- `xeyes` — with http://localhost:6080/vnc.html open and connected, run this in
+  a container shell; a window should appear in the browser tab, confirming the
+  virtual display works, before trying rviz2/Gazebo

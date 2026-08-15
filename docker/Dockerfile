@@ -15,7 +15,23 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     ros-jazzy-rviz2 \
     ros-jazzy-rqt \
     ros-jazzy-rqt-common-plugins \
+    ros-jazzy-joint-state-publisher \
+    ros-jazzy-joint-state-publisher-gui \
+    ros-jazzy-xacro \
+    ros-jazzy-robot-state-publisher \
     x11-apps \
+    # virtual desktop (Xvfb + fluxbox + x11vnc + noVNC) -- XQuartz's indirect
+    # GLX can't satisfy rviz2/Gazebo's OpenGL context requests, so GUI apps
+    # render into this self-contained virtual display instead, viewable at
+    # http://localhost:6080 in any browser. Software GL via llvmpipe (part of
+    # the mesa packages already pulled in by rviz2/Gazebo).
+    xvfb \
+    fluxbox \
+    x11vnc \
+    novnc \
+    websockify \
+    x11-utils \
+    mesa-utils \
     # dev tools
     build-essential \
     git \
@@ -44,7 +60,8 @@ RUN mkdir -p /workspace \
     && chown -R ${USERNAME}:${USERNAME} /workspace
 
 COPY --chown=${USERNAME}:${USERNAME} entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY start-vnc.sh /usr/local/bin/start-vnc.sh
+RUN chmod +x /entrypoint.sh /usr/local/bin/start-vnc.sh
 
 USER ${USERNAME}
 WORKDIR /workspace
