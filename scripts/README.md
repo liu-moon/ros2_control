@@ -1,6 +1,22 @@
 # 把 URDF / XACRO 导入 Blender
 
-ROS 2 跑在 **Docker** 里，Blender 跑在 **macOS 本机**。Blender 读不懂 `.xacro`，也不认识 `package://` 网格路径，所以要先在容器里展平模型，再在本机导入。
+ROS 2 跑在 **Docker** 里，Blender 跑在 **macOS 本机**。不想记命令时，用本机网页即可。
+
+## 网页操作（推荐）
+
+在仓库根目录：
+
+```bash
+python3 scripts/urdf_blender_web.py
+```
+
+浏览器会打开 **http://127.0.0.1:8765**。选一个模型，点 **导出并打开 Blender**。服务只监听本机。
+
+需要 Docker 容器在跑（`docker compose up -d`），以及本机已安装 Blender。
+
+下面是同样流程的命令行写法。
+
+## 为什么要两步
 
 ```
 .urdf.xacro  --(export)-->  blender_export/*.urdf + meshes/  --(import)-->  Blender 场景

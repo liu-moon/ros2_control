@@ -62,4 +62,5 @@ the image (`docker compose build`) when you add new system/apt dependencies to
 ## URDF → Blender
 
 To flatten a URDF/XACRO and import it into Blender on the host (for tutorial
-videos), see [scripts/README.md](scripts/README.md).
+videos), run `python3 scripts/urdf_blender_web.py` and open
+http://127.0.0.1:8765 — or see [scripts/README.md](scripts/README.md).
