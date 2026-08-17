@@ -1,9 +1,11 @@
 services:
   ros2_control:
+    # Prebuilt image from Docker Hub. `docker compose up` uses it as-is.
+    # Keep `build` so you can still rebuild locally with `docker compose build`.
+    image: liumoon710/ros2:jazzy-dev
     build:
       context: ./docker
       dockerfile: Dockerfile
-    image: ros2_control:jazzy-dev
     container_name: ros2_control_dev
     stdin_open: true
     tty: true

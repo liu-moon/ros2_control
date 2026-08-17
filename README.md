@@ -23,17 +23,20 @@ fluxbox + x11vnc + noVNC), viewable in any browser — no host X server needed.
 No password is set on the VNC server; the port is bound to `127.0.0.1` only,
 so it's not reachable outside your machine.
 
-## Build
+## Run (use the prebuilt image)
+
+The image is published as `liumoon710/ros2:jazzy-dev`. Pull it and start — no local `docker compose build` needed:
+
+```
+docker pull liumoon710/ros2:jazzy-dev
+docker compose up -d
+docker compose exec ros2_control bash
+```
+
+## Build (only if you change the Dockerfile)
 
 ```
 docker compose build
-```
-
-## Run
-
-```
-docker compose up -d
-docker compose exec ros2_control bash
 ```
 
 ## Inside the container
