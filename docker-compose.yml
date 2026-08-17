@@ -11,6 +11,7 @@ services:
     tty: true
     volumes:
       - ./src:/workspace/src
+      - ./docker/start-vnc.sh:/usr/local/bin/start-vnc.sh:ro
     ports:
       # noVNC web client -- open http://localhost:6080/vnc.html in a browser
       # to see the container's virtual desktop. Bound to localhost only.
