@@ -58,3 +58,8 @@ the image (`docker compose build`) when you add new system/apt dependencies to
 - `xeyes` — with http://localhost:6080/vnc.html open and connected, run this in
   a container shell; a window should appear in the browser tab, confirming the
   virtual display works, before trying rviz2/Gazebo
+
+## URDF → Blender
+
+To flatten a URDF/XACRO and import it into Blender on the host (for tutorial
+videos), see [scripts/README.md](scripts/README.md).

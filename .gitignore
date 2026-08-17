@@ -10,5 +10,8 @@ log/
 .DS_Store
 .vscode/
 
+# Flattened URDF + copied meshes generated for Blender import
+**/blender_export/
+
 # Claude Code local, machine-specific settings
 .claude/settings.local.json
