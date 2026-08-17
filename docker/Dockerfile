@@ -19,6 +19,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     ros-jazzy-joint-state-publisher-gui \
     ros-jazzy-xacro \
     ros-jazzy-robot-state-publisher \
+    ros-jazzy-urdf-tutorial \
     x11-apps \
     # virtual desktop (Xvfb + fluxbox + x11vnc + noVNC) -- XQuartz's indirect
     # GLX can't satisfy rviz2/Gazebo's OpenGL context requests, so GUI apps
@@ -56,7 +57,9 @@ RUN echo '\n# ROS2 environment\nsource /opt/ros/jazzy/setup.bash\nif [ -f /works
 # The ros:jazzy base (Ubuntu Noble) already ships a UID/GID 1000 "ubuntu" user
 # -- reuse it instead of creating a new one (avoids a GID collision).
 ARG USERNAME=ubuntu
-RUN mkdir -p /workspace \
+RUN echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} \
+    && chmod 0440 /etc/sudoers.d/${USERNAME} \
+    && mkdir -p /workspace \
     && chown -R ${USERNAME}:${USERNAME} /workspace
 
 COPY --chown=${USERNAME}:${USERNAME} entrypoint.sh /entrypoint.sh
