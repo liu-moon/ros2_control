@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Import a flattened URDF into Blender as a link/joint Empty tree.
+"""Import a flattened URDF or a meshes directory into Blender.
 
 Run from Blender (not system Python):
 
     blender --python scripts/import_urdf.py -- src/urdf_tutorial/blender_export/08-macroed.urdf
+    blender --python scripts/import_urdf.py -- src/robomaster_ros/robomaster_description/blender_export/meshes
 
 Optional:
 
@@ -12,15 +13,21 @@ Optional:
 Each URDF link becomes an Empty; visual geometry is parented to it.
 Each URDF joint becomes an Empty between parent and child, locked to the
 joint type/axis so you can keyframe wheels, the head, and the gripper.
+
+A meshes directory (or meshes_manifest.json) is imported as a parts library
+laid out on a grid so the files do not stack at the origin.
 """
 from __future__ import annotations
 
+import json
 import math
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+
+MESH_SUFFIXES = {".dae", ".stl", ".obj", ".glb", ".gltf"}
 
 try:
     import bpy
@@ -29,7 +36,8 @@ try:
 except ImportError:
     sys.exit(
         "Run this script from Blender:\n"
-        "  blender --python scripts/import_urdf.py -- path/to/robot.urdf"
+        "  blender --python scripts/import_urdf.py -- path/to/robot.urdf\n"
+        "  blender --python scripts/import_urdf.py -- path/to/blender_export/meshes"
     )
 
 Vec3 = Tuple[float, float, float]
@@ -457,6 +465,100 @@ def _collada_image_path(root: ET.Element, dae_path: Path) -> Optional[Path]:
     return None
 
 
+def _collada_primitive_faces(
+    prim: ET.Element,
+    sources: Dict[str, Tuple[List[float], int]],
+) -> Tuple[
+    List[Tuple[int, int, int]],
+    List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]],
+    bool,
+]:
+    """Read <triangles> or triangulate <polylist> into vertex/UV faces."""
+    inputs = find_children(prim, "input")
+    max_offset = 0
+    vertex_offset = 0
+    tex_offset = None
+    tex_id = None
+    for inp in inputs:
+        offset = int(inp.get("offset", "0"))
+        max_offset = max(max_offset, offset)
+        semantic = inp.get("semantic")
+        if semantic == "VERTEX":
+            vertex_offset = offset
+        elif semantic == "TEXCOORD" and tex_offset is None:
+            tex_offset = offset
+            tex_id = (inp.get("source") or "").lstrip("#")
+    stride = max_offset + 1
+    p_el = find_child(prim, "p")
+    raw = [int(p) for p in (p_el.text or "").split()] if p_el is not None else []
+    tex_data, tex_stride = sources.get(tex_id or "", ([], 2))
+
+    def uv_at(index: int) -> Tuple[float, float]:
+        if not tex_data:
+            return (0.0, 0.0)
+        base = index * tex_stride
+        if base + 1 >= len(tex_data):
+            return (0.0, 0.0)
+        return (tex_data[base], tex_data[base + 1])
+
+    def uv_triple(corners: List[int], i0: int, i1: int, i2: int):
+        if tex_offset is None:
+            return ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0))
+        return (
+            uv_at(corners[i0 * stride + tex_offset]),
+            uv_at(corners[i1 * stride + tex_offset]),
+            uv_at(corners[i2 * stride + tex_offset]),
+        )
+
+    faces: List[Tuple[int, int, int]] = []
+    face_uvs: List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]] = []
+    kind = local_tag(prim)
+    if kind == "triangles":
+        for i in range(0, len(raw), stride * 3):
+            corner = raw[i : i + stride * 3]
+            if len(corner) < stride * 3:
+                break
+            faces.append(
+                (
+                    corner[vertex_offset],
+                    corner[stride + vertex_offset],
+                    corner[2 * stride + vertex_offset],
+                )
+            )
+            face_uvs.append(uv_triple(corner, 0, 1, 2))
+    elif kind == "polylist":
+        vcount_el = find_child(prim, "vcount")
+        counts = [int(p) for p in (vcount_el.text or "").split()] if vcount_el is not None else []
+        cursor = 0
+        for count in counts:
+            needed = count * stride
+            corner = raw[cursor : cursor + needed]
+            cursor += needed
+            if len(corner) < needed or count < 3:
+                continue
+            verts = [corner[i * stride + vertex_offset] for i in range(count)]
+            for i in range(1, count - 1):
+                faces.append((verts[0], verts[i], verts[i + 1]))
+                face_uvs.append(uv_triple(corner, 0, i, i + 1))
+    return faces, face_uvs, bool(tex_data)
+
+
+def _collada_diffuse_rgba(root: ET.Element) -> Optional[Tuple[float, float, float, float]]:
+    for el in root.iter():
+        if local_tag(el) != "diffuse":
+            continue
+        color = find_child(el, "color")
+        if color is None or not (color.text or "").strip():
+            continue
+        parts = [float(p) for p in color.text.split()]
+        if len(parts) < 3:
+            continue
+        r, g, b = parts[0], parts[1], parts[2]
+        a = parts[3] if len(parts) > 3 else 1.0
+        return (r, g, b, a)
+    return None
+
+
 def import_collada_mesh(path: Path, collection, name: str) -> Optional[object]:
     """Parse a simple triangle COLLADA file. Blender 5+ no longer ships Collada I/O."""
     tree = ET.parse(path)
@@ -492,62 +594,33 @@ def import_collada_mesh(path: Path, collection, name: str) -> Optional[object]:
         for i in range(0, len(pos_data) - 2, pos_stride)
     ]
 
-    triangles = find_child(geom, "triangles")
-    if triangles is None:
-        print(f"warning: no <triangles> in {path}")
+    primitives = [
+        child
+        for child in list(geom)
+        if local_tag(child) in {"triangles", "polylist"}
+    ]
+    if not primitives:
+        print(f"warning: no <triangles>/<polylist> in {path}")
         return None
-    inputs = find_children(triangles, "input")
-    max_offset = 0
-    vertex_offset = 0
-    tex_offset = None
-    tex_id = None
-    for inp in inputs:
-        offset = int(inp.get("offset", "0"))
-        max_offset = max(max_offset, offset)
-        semantic = inp.get("semantic")
-        if semantic == "VERTEX":
-            vertex_offset = offset
-        elif semantic == "TEXCOORD" and tex_offset is None:
-            tex_offset = offset
-            tex_id = (inp.get("source") or "").lstrip("#")
-    stride = max_offset + 1
-    raw = [int(p) for p in (find_child(triangles, "p").text or "").split()]
+
     faces: List[Tuple[int, int, int]] = []
     face_uvs: List[Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]] = []
-    tex_data, tex_stride = sources.get(tex_id or "", ([], 2))
+    has_uv = False
+    for prim in primitives:
+        prim_faces, prim_uvs, prim_uv = _collada_primitive_faces(prim, sources)
+        faces.extend(prim_faces)
+        face_uvs.extend(prim_uvs)
+        has_uv = has_uv or prim_uv
 
-    def uv_at(index: int) -> Tuple[float, float]:
-        if not tex_data:
-            return (0.0, 0.0)
-        base = index * tex_stride
-        if base + 1 >= len(tex_data):
-            return (0.0, 0.0)
-        return (tex_data[base], tex_data[base + 1])
-
-    for i in range(0, len(raw), stride * 3):
-        corner = raw[i : i + stride * 3]
-        if len(corner) < stride * 3:
-            break
-        i0 = corner[vertex_offset]
-        i1 = corner[stride + vertex_offset]
-        i2 = corner[2 * stride + vertex_offset]
-        faces.append((i0, i1, i2))
-        if tex_offset is None:
-            face_uvs.append(((0.0, 0.0), (0.0, 0.0), (0.0, 0.0)))
-        else:
-            face_uvs.append(
-                (
-                    uv_at(corner[tex_offset]),
-                    uv_at(corner[stride + tex_offset]),
-                    uv_at(corner[2 * stride + tex_offset]),
-                )
-            )
+    if not faces:
+        print(f"warning: no faces in {path}")
+        return None
 
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(positions, [], faces)
     mesh.validate()
     mesh.update()
-    if tex_data:
+    if has_uv:
         uv_layer = mesh.uv_layers.new(name="UVMap")
         for loop_index, uv in enumerate(uv for triple in face_uvs for uv in triple):
             if loop_index < len(uv_layer.data):
@@ -569,6 +642,10 @@ def import_collada_mesh(path: Path, collection, name: str) -> Optional[object]:
         if bsdf is not None:
             links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
         assign_material(obj, mat)
+    else:
+        rgba = _collada_diffuse_rgba(root)
+        if rgba is not None:
+            assign_material(obj, get_or_create_material(f"{name}_phong", rgba, {}))
     return obj
 
 
@@ -677,6 +754,10 @@ def create_visuals(link: Link, link_obj, robot: Robot, collection, mat_cache) ->
         if obj is None:
             continue
         parent_local(obj, link_obj, origin_matrix(visual.xyz, visual.rpy))
+        # Keep Collada textures/phong. URDF solid colors would wipe EP_all_01_b.png
+        # off the arm/gripper and make those parts look missing.
+        if obj.data is not None and obj.data.materials:
+            continue
         rgba = visual.rgba
         mat_name = visual.material_name
         if rgba is None and mat_name and mat_name in robot.materials:
@@ -744,12 +825,15 @@ def import_robot(robot: Robot):
     return robot_root
 
 
-def frame_view() -> None:
+def frame_view(center: Optional[Vec3] = None, distance: Optional[float] = None) -> None:
     """Point the 3D viewport at the robot without relying on view operators."""
     wm = bpy.context.window_manager
     if wm is None:
         return
     from mathutils import Euler
+
+    location = center if center is not None else (0.0, 0.0, 0.2)
+    view_distance = distance if distance is not None else 3.0
 
     for window in wm.windows:
         screen = window.screen
@@ -768,8 +852,8 @@ def frame_view() -> None:
             r3d = space.region_3d
             if r3d is not None:
                 r3d.view_perspective = "PERSP"
-                r3d.view_location = (0.0, 0.0, 0.2)
-                r3d.view_distance = 3.0
+                r3d.view_location = location
+                r3d.view_distance = view_distance
                 r3d.view_rotation = Euler(
                     (math.radians(70.0), 0.0, math.radians(55.0))
                 ).to_quaternion()
@@ -777,7 +861,7 @@ def frame_view() -> None:
 
 
 def parse_cli(args: List[str]) -> Tuple[Path, Optional[Path]]:
-    urdf: Optional[Path] = None
+    source: Optional[Path] = None
     save: Optional[Path] = None
     i = 0
     while i < len(args):
@@ -789,30 +873,160 @@ def parse_cli(args: List[str]) -> Tuple[Path, Optional[Path]]:
             continue
         if args[i].startswith("-"):
             sys.exit(f"error: unknown option {args[i]}")
-        urdf = Path(args[i])
+        source = Path(args[i])
         i += 1
-    if urdf is None:
+    if source is None:
         sys.exit(
-            "Usage: blender --python scripts/import_urdf.py -- <robot.urdf> [--save out.blend]"
+            "Usage: blender --python scripts/import_urdf.py -- "
+            "<robot.urdf|meshes_dir|meshes_manifest.json> [--save out.blend]"
         )
-    return urdf, save
+    return source, save
+
+
+def is_parts_source(path: Path) -> bool:
+    if path.is_dir():
+        return True
+    return path.suffix.lower() == ".json"
+
+
+def parts_collection_name(source: Path) -> str:
+    cursor = source
+    if cursor.is_file():
+        cursor = cursor.parent
+    if cursor.name == "meshes":
+        cursor = cursor.parent
+    if cursor.name == "blender_export":
+        cursor = cursor.parent
+    return f"{cursor.name}_meshes"
+
+
+def list_part_files(source: Path) -> List[Path]:
+    if source.is_dir():
+        files = [
+            path
+            for path in sorted(source.iterdir())
+            if path.is_file() and path.suffix.lower() in MESH_SUFFIXES
+        ]
+        if not files:
+            sys.exit(f"error: no mesh files in {source}")
+        return files
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.exit(f"error: cannot read manifest {source}: {exc}")
+    names = payload.get("files") if isinstance(payload, dict) else None
+    if not isinstance(names, list) or not names:
+        sys.exit(f"error: {source} has no files list")
+    files = []
+    for name in names:
+        path = (source.parent / name).resolve()
+        if path.is_file() and path.suffix.lower() in MESH_SUFFIXES:
+            files.append(path)
+        else:
+            print(f"warning: mesh not found: {path}")
+    if not files:
+        sys.exit(f"error: no mesh files listed in {source}")
+    return files
+
+
+def _object_size_xy(obj) -> Tuple[float, float]:
+    xs = [corner[0] for corner in obj.bound_box]
+    ys = [corner[1] for corner in obj.bound_box]
+    return (max(xs) - min(xs), max(ys) - min(ys))
+
+
+def layout_grid(objects: Sequence, gap: float = 0.04) -> Tuple[Vec3, float]:
+    if not objects:
+        return (0.0, 0.0, 0.0), 3.0
+    bpy.context.view_layer.update()
+    sizes = [_object_size_xy(obj) for obj in objects]
+    cell = max(max(w, d) for w, d in sizes) + gap
+    cell = max(cell, 0.08)
+    cols = max(1, math.ceil(math.sqrt(len(objects))))
+    rows = math.ceil(len(objects) / cols)
+    for index, obj in enumerate(objects):
+        row, col = divmod(index, cols)
+        obj.location = (col * cell, -row * cell, 0.0)
+    center_x = (cols - 1) * cell / 2.0
+    center_y = -(rows - 1) * cell / 2.0
+    span = max(cols, rows) * cell
+    return (center_x, center_y, 0.0), max(3.0, span * 1.4)
+
+
+def import_parts(source: Path):
+    configure_scene()
+    files = list_part_files(source)
+    name = parts_collection_name(source)
+    collection = unique_collection(name)
+    root = new_empty(name, collection, "PLAIN_AXES", 0.12)
+    root["urdf_parts"] = name
+
+    imported = []
+    for path in files:
+        obj = import_mesh_file(path, collection)
+        if obj is None:
+            continue
+        obj.name = path.stem
+        parent_local(obj, root, Matrix.Identity(4))
+        imported.append(obj)
+        print(f"Imported part: {path.name}")
+
+    center, distance = layout_grid(imported)
+    reveal_collection(collection)
+    bpy.ops.object.select_all(action="DESELECT")
+    for obj in collection.objects:
+        obj.hide_set(False)
+        obj.hide_viewport = False
+        obj.select_set(True)
+    bpy.context.view_layer.objects.active = root
+    frame_view(center, distance)
+    print(
+        f"Created {len(collection.objects)} objects ({len(imported)} meshes) "
+        f"in collection '{collection.name}'."
+    )
+    return root
+
+
+def default_save_path(source: Path) -> Path:
+    if source.is_dir():
+        if source.name == "meshes":
+            return source.parent / "meshes.blend"
+        return source / "meshes.blend"
+    if source.suffix.lower() == ".json":
+        return source.with_name("meshes.blend")
+    return source.with_suffix(".blend")
 
 
 def main() -> None:
-    urdf_path, save_path = parse_cli(_argv_after_double_dash())
-    if not urdf_path.is_file():
-        sys.exit(f"error: URDF not found: {urdf_path}")
-    robot = parse_urdf(urdf_path)
-    print(
-        f"Importing '{robot.name}': {len(robot.links)} links, {len(robot.joints)} joints"
-    )
-    import_robot(robot)
-    print(
-        f"Robot is in Outliner collection '{robot.name}'. "
-        "Select head_swivel / *_wheel_joint / gripper_extension to pose it."
-    )
+    source, save_path = parse_cli(_argv_after_double_dash())
+    if not source.exists():
+        sys.exit(f"error: path not found: {source}")
+    if is_parts_source(source):
+        print(f"Importing parts from {source}")
+        import_parts(source)
+        print(
+            f"Parts are in Outliner collection '{parts_collection_name(source)}'."
+        )
+    else:
+        if not source.is_file():
+            sys.exit(f"error: URDF not found: {source}")
+        robot = parse_urdf(source)
+        if not robot.links:
+            sys.exit(
+                f"error: {source} has no links. Export a complete robot "
+                "(robomaster_ep.urdf.xacro / robomaster_s1.urdf.xacro), "
+                "not a macro fragment such as camera.urdf.xacro."
+            )
+        print(
+            f"Importing '{robot.name}': {len(robot.links)} links, {len(robot.joints)} joints"
+        )
+        import_robot(robot)
+        print(
+            f"Robot is in Outliner collection '{robot.name}'. "
+            "Select head_swivel / *_wheel_joint / gripper_extension to pose it."
+        )
     if save_path is None and not bpy.app.background:
-        save_path = urdf_path.with_suffix(".blend")
+        save_path = default_save_path(source)
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
         bpy.ops.wm.save_as_mainfile(filepath=str(save_path.resolve()))
@@ -820,7 +1034,7 @@ def main() -> None:
 
 
 def _scene_has_robot() -> bool:
-    return any(obj.get("urdf_robot") for obj in bpy.data.objects)
+    return any(obj.get("urdf_robot") or obj.get("urdf_parts") for obj in bpy.data.objects)
 
 
 def _run_import_if_needed() -> None:

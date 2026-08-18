@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,14 @@ ROOT = Path(__file__).resolve().parent.parent
 EXPORT_SCRIPT = ROOT / "scripts" / "export_urdf_for_blender.sh"
 IMPORT_SCRIPT = ROOT / "scripts" / "import_urdf.py"
 DEFAULT_PORT = 8765
+MESH_EXTS = {".dae", ".stl", ".obj", ".glb", ".gltf"}
+_XACRO_MACRO_BLOCK = re.compile(
+    r"<xacro:macro\b[^>]*>.*?</xacro:macro>",
+    re.DOTALL,
+)
+_XACRO_INSTANTIATE = re.compile(
+    r"<xacro:(?!include|macro|property|arg|if|unless|insert_block)\w+"
+)
 BLENDER_CANDIDATES = (
     Path("/Applications/Blender.app/Contents/MacOS/Blender"),
     Path("/usr/bin/blender"),
@@ -36,7 +45,7 @@ PAGE = r"""<!DOCTYPE html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>URDF → Blender</title>
+  <title>URDF / meshes → Blender</title>
   <style>
     :root {
       --bg: #0f1419;
@@ -128,20 +137,20 @@ PAGE = r"""<!DOCTYPE html>
 </head>
 <body>
 <main>
-  <h1>URDF → Blender</h1>
-  <p class="lead">选一个模型，点按钮即可。不用记命令。</p>
+  <h1>URDF / meshes → Blender</h1>
+  <p class="lead">选整机或零件库，点按钮即可。不用记命令。</p>
   <div class="status" id="status"></div>
   <label for="model">模型</label>
   <select id="model"></select>
   <div class="meta" id="meta"></div>
   <div class="actions">
     <button class="primary" id="btn-open">导出并打开 Blender</button>
-    <button id="btn-export">只导出 URDF</button>
+    <button id="btn-export">只导出</button>
     <button id="btn-blend">打开已有 .blend</button>
   </div>
   <label>日志</label>
   <pre id="log">选好模型后点上面的按钮。</pre>
-  <p class="hint">Blender 会在本机弹出窗口。若场景里只有立方体，先完全退出 Blender 再点一次「导出并打开 Blender」。</p>
+  <p class="hint">Blender 会在本机弹出窗口。若场景里只有立方体，先完全退出 Blender 再点一次「导出并打开 Blender」。零件库导出不需要 Docker。</p>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -171,10 +180,21 @@ function renderStatus(info) {
   $("status").innerHTML = chips.join("");
 }
 
+function kindLabel(m) {
+  if (m.kind === "meshes") return "零件库（.dae），不经 Docker";
+  if (m.kind === "xacro") return "XACRO，导出时会在 Docker 里展平";
+  return "纯 URDF";
+}
+
+function optionLabel(m) {
+  const prefix = m.kind === "meshes" ? "[零件]" : m.kind === "xacro" ? "[XACRO]" : "[URDF]";
+  return prefix + " " + m.path;
+}
+
 function renderMeta() {
   const m = selected();
   if (!m) { $("meta").textContent = ""; return; }
-  const bits = [m.kind === "xacro" ? "XACRO，导出时会在 Docker 里展平" : "纯 URDF"];
+  const bits = [kindLabel(m)];
   bits.push(m.exported ? "已有导出文件" : "尚未导出");
   bits.push(m.blend ? "已有 .blend" : "还没有 .blend");
   $("meta").textContent = bits.join(" · ");
@@ -185,9 +205,11 @@ function renderModels() {
   const sel = $("model");
   const prev = sel.value;
   sel.innerHTML = models.map((m) =>
-    `<option value="${m.path}">${m.path}</option>`
+    `<option value="${m.path}">${optionLabel(m)}</option>`
   ).join("");
-  const prefer = prev || models.find((m) => m.path.includes("08-macroed"))?.path;
+  const prefer = prev
+    || models.find((m) => m.path.includes("robomaster_ep"))?.path
+    || models.find((m) => m.path.includes("08-macroed"))?.path;
   if (prefer && models.some((m) => m.path === prefer)) sel.value = prefer;
   renderMeta();
 }
@@ -265,36 +287,95 @@ def docker_running() -> bool:
     return result.returncode == 0 and "ros2_control" in result.stdout.split()
 
 
+def blender_export_dir(source: Path) -> Path:
+    if source.is_dir():
+        return (source.parent / "blender_export").resolve()
+    return (source.parent / ".." / "blender_export").resolve()
+
+
+def export_artifact(source: Path) -> Path:
+    if source.is_dir():
+        return blender_export_dir(source) / "meshes_manifest.json"
+    stem = source.name.removesuffix(".xacro").removesuffix(".urdf")
+    return blender_export_dir(source) / f"{stem}.urdf"
+
+
+def blend_path_for(source: Path) -> Path:
+    if source.is_dir():
+        return blender_export_dir(source) / "meshes.blend"
+    return export_artifact(source).with_suffix(".blend")
+
+
+def import_path_for(source: Path) -> Path:
+    if source.is_dir():
+        return blender_export_dir(source) / "meshes"
+    return export_artifact(source)
+
+
+def is_mesh_dir(path: Path) -> bool:
+    if not path.is_dir() or path.name != "meshes":
+        return False
+    try:
+        return any(child.is_file() and child.suffix.lower() in MESH_EXTS for child in path.iterdir())
+    except OSError:
+        return False
+
+
+def is_complete_robot(path: Path) -> bool:
+    """Skip xacro fragments that only define macros (arm.urdf.xacro, etc.)."""
+    if not path.name.endswith(".xacro"):
+        return True
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    defines_macros = "<xacro:macro" in text
+    stripped = text
+    previous = None
+    while previous != stripped:
+        previous = stripped
+        stripped = _XACRO_MACRO_BLOCK.sub("", stripped)
+    instantiates = bool(_XACRO_INSTANTIATE.search(stripped))
+    if defines_macros and not instantiates:
+        return False
+    return True
+
+
+def model_entry(source: Path, kind: str) -> dict:
+    exported = export_artifact(source)
+    blend = blend_path_for(source)
+    return {
+        "path": repo_rel(source),
+        "kind": kind,
+        "exported": exported.is_file(),
+        "exported_path": repo_rel(exported) if exported.is_file() else None,
+        "blend": blend.is_file(),
+        "blend_path": repo_rel(blend) if blend.is_file() else None,
+    }
+
+
 def list_models() -> list[dict]:
     models = []
     src = ROOT / "src"
     if not src.is_dir():
         return models
     for path in sorted(src.rglob("*")):
-        if not path.is_file():
-            continue
         if "blender_export" in path.parts:
             continue
-        if path.suffix not in {".urdf", ".xacro"}:
+        if path.is_dir() and is_mesh_dir(path):
+            models.append(model_entry(path, "meshes"))
             continue
-        exported = export_urdf_path(path)
-        blend = exported.with_suffix(".blend")
-        models.append(
-            {
-                "path": repo_rel(path),
-                "kind": "xacro" if path.name.endswith(".xacro") else "urdf",
-                "exported": exported.is_file(),
-                "exported_path": repo_rel(exported) if exported.is_file() else None,
-                "blend": blend.is_file(),
-                "blend_path": repo_rel(blend) if blend.is_file() else None,
-            }
-        )
+        if not path.is_file():
+            continue
+        if path.suffix == ".urdf" and not path.name.endswith(".xacro"):
+            models.append(model_entry(path, "urdf"))
+            continue
+        if not path.name.endswith(".urdf.xacro"):
+            continue
+        if not is_complete_robot(path):
+            continue
+        models.append(model_entry(path, "xacro"))
     return models
-
-
-def export_urdf_path(source: Path) -> Path:
-    stem = source.name.removesuffix(".xacro").removesuffix(".urdf")
-    return (source.parent / ".." / "blender_export" / f"{stem}.urdf").resolve()
 
 
 def safe_source(rel: str) -> Path:
@@ -305,7 +386,11 @@ def safe_source(rel: str) -> Path:
     if src_root not in path.parents and path != src_root:
         raise ValueError("path must be under src/")
     if "blender_export" in path.parts:
-        raise ValueError("pick a source URDF/XACRO, not blender_export")
+        raise ValueError("pick a source URDF/XACRO or meshes folder, not blender_export")
+    if path.is_dir():
+        if not is_mesh_dir(path):
+            raise ValueError("directory is not a meshes folder")
+        return path
     if path.suffix not in {".urdf", ".xacro"} or not path.is_file():
         raise ValueError("not a URDF/XACRO file")
     return path
@@ -343,8 +428,8 @@ def spawn_blender(args: list[str]) -> None:
 def handle_run(payload: dict) -> dict:
     source = safe_source(payload.get("path", ""))
     action = payload.get("action")
-    exported = export_urdf_path(source)
-    blend = exported.with_suffix(".blend")
+    blend = blend_path_for(source)
+    imported = import_path_for(source)
 
     if action == "export":
         log = run_export(source)
@@ -353,9 +438,12 @@ def handle_run(payload: dict) -> dict:
     if action == "open":
         log = run_export(source)
         spawn_blender(
-            ["--python", str(IMPORT_SCRIPT), "--", str(exported)]
+            ["--python", str(IMPORT_SCRIPT), "--", str(imported)]
         )
-        log += "\n\n已启动 Blender 导入。稍等窗口出现；Outliner 里应有机器人集合。"
+        if source.is_dir():
+            log += "\n\n已启动 Blender 导入零件库。稍等窗口出现；Outliner 里应有 meshes 集合。"
+        else:
+            log += "\n\n已启动 Blender 导入。稍等窗口出现；Outliner 里应有机器人集合。"
         return {"ok": True, "log": log}
 
     if action == "blend":
@@ -418,7 +506,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Local URDF → Blender web UI")
+    parser = argparse.ArgumentParser(description="Local URDF / meshes → Blender web UI")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
@@ -428,7 +516,7 @@ def main() -> None:
     host = "127.0.0.1"
     httpd = ThreadingHTTPServer((host, args.port), Handler)
     url = f"http://{host}:{args.port}/"
-    print(f"URDF → Blender UI: {url}", flush=True)
+    print(f"URDF / meshes → Blender UI: {url}", flush=True)
     print("按 Ctrl+C 停止。只监听本机，不会暴露到局域网。", flush=True)
     if not args.no_browser:
         threading.Timer(0.4, partial(webbrowser.open, url)).start()
