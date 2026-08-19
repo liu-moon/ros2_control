@@ -48,8 +48,40 @@ source install/setup.bash
 ```
 
 Put your ROS 2 packages under `src/` on the host — they show up at
-`/workspace/src` in the container immediately, no rebuild needed. Only rebuild
-the image (`docker compose build`) when you add new system/apt dependencies to
+`/workspace/src` in the container immediately, no rebuild needed.
+
+## Manage external repositories
+
+This workspace uses [vcstool](https://github.com/dirtsimple/vcstool) to manage
+external ROS repositories. The repository list is in `repos.yaml`.
+
+Install it on the host or in the container:
+
+```bash
+pip install vcstool
+# Ubuntu alternative: sudo apt install python3-vcstool
+```
+
+Import the repositories:
+
+```bash
+vcs import src < repos.yaml
+```
+
+Useful commands:
+
+```bash
+vcs status src
+vcs pull src
+vcs validate < repos.yaml
+vcs export --exact src > repos.lock.repos
+```
+
+`my_robot_bringup` and `my_robot_description` are local packages, so they are
+not listed in `repos.yaml`. Commit `repos.yaml` and, for reproducible builds,
+`repos.lock.repos`.
+
+Only rebuild the image (`docker compose build`) when you add new system/apt dependencies to
 `docker/Dockerfile`.
 
 ## Verify the setup

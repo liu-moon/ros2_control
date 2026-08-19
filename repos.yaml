@@ -1,0 +1,23 @@
+# External repositories imported into the ROS 2 workspace.
+# Local packages under src/ are intentionally not listed here.
+#
+# Common commands (run from the workspace root):
+#   vcs import src < repos.yaml       # clone/update repositories listed here
+#   vcs status src                     # show status of all repositories
+#   vcs pull src                       # pull updates for all repositories
+#   vcs validate < repos.yaml         # validate this file
+#   vcs export --exact src > repos.lock.repos  # save exact commits
+#
+# Install vcstool if needed:
+#   pip install vcstool
+#   sudo apt install python3-vcstool  # Ubuntu/Debian
+repositories:
+  robomaster_ros:
+    type: git
+    url: https://github.com/jeguzzi/robomaster_ros.git
+    version: main
+
+  urdf_tutorial:
+    type: git
+    url: https://github.com/ros/urdf_tutorial.git
+    version: ros2

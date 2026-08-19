@@ -13,5 +13,9 @@ log/
 # Flattened URDF + copied meshes generated for Blender import
 **/blender_export/
 
+# Repositories managed by vcstool (see repos.yaml)
+/src/robomaster_ros/
+/src/urdf_tutorial/
+
 # Claude Code local, machine-specific settings
 .claude/settings.local.json
